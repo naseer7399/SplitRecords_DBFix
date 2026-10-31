@@ -101,7 +101,7 @@
    internet who finds your config, which would expose student data.
    ------------------------------------------------------------------ */
 
-const firebaseConfig = {
+const FIREBASE_CONFIG = {
   apiKey: "AIzaSyCfnXLc7NBpWSFxttV-7kiaiTbauub-sog",
   authDomain: "splitdbtest-iks.firebaseapp.com",
   projectId: "splitdbtest-iks",
@@ -111,6 +111,5 @@ const firebaseConfig = {
   measurementId: "G-9ZW5CSMC0E"
 };
 
-// Initialize Firebase
-const app = initializeApp(firebaseConfig);
-const analytics = getAnalytics(app);
+// Flip this to true only after completing the steps above.
+const FIREBASE_ENABLED = true;
