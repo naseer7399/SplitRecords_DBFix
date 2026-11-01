@@ -638,10 +638,14 @@ function cloudAttach(){
     cloudApplyRemote(path, data);
     cloudScheduleRender();
   };
+  // includeMetadataChanges: also notify us when a snapshot changes from "copy kept on this device" to
+  // "confirmed by the server". Without it, an EMPTY list (e.g. no expenses yet) read from the device copy
+  // while the connection is still starting would never be confirmed, and the device would never finish loading.
+  const LISTEN = { includeMetadataChanges: true };
   const onErr = (name) => (err) => console.error('Cloud listener error (' + name + ')', err);
 
   CLOUD_SINGLES.forEach(name => {
-    const unsub = db.doc('ikhlas_school/' + name).onSnapshot(snap => {
+    const unsub = db.doc('ikhlas_school/' + name).onSnapshot(LISTEN, snap => {
       if(!trusted[name] && (!snap.metadata.fromCache || snap.exists)) trusted[name] = true;
       handleChange('ikhlas_school/' + name, snap.exists ? snap.data() : null, snap.metadata.hasPendingWrites);
       tryCompose();
@@ -649,7 +653,7 @@ function cloudAttach(){
     cloudUnsubs.push(unsub);
   });
   CLOUD_COLS.forEach(col => {
-    const unsub = db.collection(CLOUD_DATA + '/' + col).onSnapshot(snap => {
+    const unsub = db.collection(CLOUD_DATA + '/' + col).onSnapshot(LISTEN, snap => {
       if(!trusted[col] && (!snap.metadata.fromCache || !snap.empty)) trusted[col] = true;
       snap.docChanges().forEach(ch => {
         handleChange(ch.doc.ref.path, ch.type === 'removed' ? null : ch.doc.data(), ch.doc.metadata.hasPendingWrites);
@@ -861,7 +865,8 @@ function cloudMigrate(log){
 }
 // Re-reads everything from the server and compares it with this device's data.
 function cloudVerifyNow(log){
-  if(cloudMode !== 'v2' || !cloudReady) return Promise.reject(new Error('The new layout is not active on this device.'));
+  if(cloudMode !== 'v2') return Promise.reject(new Error('The new layout is not active on this device.'));
+  if(!cloudReady) return Promise.reject(new Error('This device has not finished loading the cloud data yet (still connecting, or it started without a good connection). Reload this page while connected and wait a few seconds. Until then, changes made on this device are NOT being uploaded.'));
   const expected = cloudSplit(DB);
   log('Reading all documents from the cloud\u2026');
   return cloudReadServerState().then(actual => {
@@ -962,9 +967,16 @@ function cloudWireSettingsPanel(){
     if(el) el.textContent = '';
     cloudVerifyNow(log).then(r => {
       const d = r.diff;
+      const names = (arr) => arr.slice(0, 6).map(x => x.replace('ikhlas_school/data/', '').replace('ikhlas_school/', '')).join(', ') + (arr.length > 6 ? ', \u2026' : '');
       log('Cloud has ' + r.actual + ' documents; this device expects ' + r.expected + '.');
       if(!d.missing.length && !d.changed.length && !d.extra.length) log('All documents match.');
-      else log('Differences: ' + d.missing.length + ' missing in cloud, ' + d.changed.length + ' different, ' + d.extra.length + ' only in cloud.' + (d.missing.length || d.changed.length ? ' A new save will re-upload them.' : ''));
+      else{
+        log('Differences: ' + d.missing.length + ' missing in cloud, ' + d.changed.length + ' different, ' + d.extra.length + ' only in cloud.');
+        if(d.changed.length) log('Different: ' + names(d.changed));
+        if(d.missing.length) log('Missing in cloud: ' + names(d.missing));
+        if(d.extra.length) log('Only in cloud: ' + names(d.extra));
+        log('Another device may have saved a moment ago. Wait a few seconds and press Verify again; if the same documents are still listed, tell the admin their names.');
+      }
     }).catch(err => log('Could not verify: ' + (err && err.message ? err.message : err)))
       .then(() => { btnVerify.disabled = false; });
   });
@@ -4505,14 +4517,16 @@ function fbuCountPromise(orig, metric, countFn){
 function fbuSnapshotWrapper(isQuery){
   return function(orig){
     return function(...args){
-      let first = true;
+      let first = true, sawCache = false;
       const tap = (snap) => {
         try{
           if(!snap) return;
-          if(snap.metadata && (snap.metadata.hasPendingWrites || snap.metadata.fromCache)) return;
+          if(snap.metadata && snap.metadata.hasPendingWrites) return;
+          if(snap.metadata && snap.metadata.fromCache){ sawCache = true; return; }
           if(isQuery){
-            const n = first ? snap.size : snap.docChanges().length;
-            fbuAdd('reads', Math.max(first ? 1 : 0, n));
+            const fresh = first && !sawCache;
+            const n = fresh ? snap.size : snap.docChanges().length;
+            fbuAdd('reads', Math.max(fresh ? 1 : 0, n));
           }else{
             fbuAdd('reads', 1);
           }
