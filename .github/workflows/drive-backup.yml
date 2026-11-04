@@ -1,0 +1,62 @@
+# Ikhlas School Manager: scheduled backup of the school database to Google Drive.
+# Put this file at  .github/workflows/drive-backup.yml  in your repository
+# (it must be on the repository's default branch, normally "main").
+# Setup steps: see BACKUP-SETUP.md.
+name: Drive backup
+
+on:
+  schedule:
+    # Checks every 6 hours. A backup is only made when the schedule you chose
+    # in the app (Settings > Automatic backup) says one is due, or when
+    # "Back up now" was pressed in the app.
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Back up now, ignoring the schedule'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  actions: write      # only used by the last step, which keeps the schedule from being paused
+
+concurrency:
+  group: drive-backup
+  cancel-in-progress: false
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: backup/package-lock.json
+
+      - name: Install
+        run: npm ci --prefix backup --no-audit --no-fund
+
+      - name: Back up to Google Drive
+        run: node backup/run.js
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+          FORCE: ${{ github.event.inputs.force }}
+          BACKUP_KEEP: '30'       # how many backup files to keep in Drive (3 to 365)
+
+      # Best effort: GitHub pauses scheduled jobs in public repositories after 60 days
+      # without activity. Re-enabling the workflow is meant to reset that timer.
+      - name: Keep the schedule active
+        if: always()
+        continue-on-error: true
+        run: gh workflow enable drive-backup.yml
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
