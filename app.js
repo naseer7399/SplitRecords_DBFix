@@ -982,6 +982,109 @@ function cloudWireSettingsPanel(){
   });
 }
 
+/* ---------------------------------------------------------------
+   Settings page: automatic backup to Google Drive
+   The backup itself is made by a scheduled GitHub job (backup/ folder,
+   see BACKUP-SETUP.md). This panel only (1) stores the schedule you
+   choose, (2) lets you request a backup, and (3) shows what the job
+   last did. Everything lives in the document ikhlas_school/backup.
+   --------------------------------------------------------------- */
+const BACKUP_DOC_PATH = 'ikhlas_school/backup';
+const BACKUP_SCHEDULES = [['off', 'Off'], ['1d', 'Every day'], ['1w', 'Every week'], ['15d', 'Every 15 days'], ['1m', 'Every month']];
+const BACKUP_INTERVAL_MS = { '1d': 86400000, '1w': 7 * 86400000, '15d': 15 * 86400000, '1m': 30 * 86400000 };
+
+function backupDocRef(){ return firebase.firestore().doc(BACKUP_DOC_PATH); }
+
+function backupPanelHTML(){
+  const head = `<div class="panel-head"><h3>Automatic backup to Google Drive</h3><div class="sub">A scheduled job saves a full backup to a private Drive folder, even when the app is closed</div></div>`;
+  if(!cloudDocRef){
+    return `<div class="panel">${head}<div class="panel-body"><p class="small-note">Turn on cloud sync and sign in to use automatic backups.</p></div></div>`;
+  }
+  return `
+  <div class="panel">${head}
+    <div class="panel-body">
+      <div class="field" style="max-width:280px;"><label for="bkSchedule">How often</label>
+        <select id="bkSchedule">${BACKUP_SCHEDULES.map(s => `<option value="${s[0]}">${s[1]}</option>`).join('')}</select></div>
+      <div class="toolbar">
+        <button class="btn btn-primary" id="btnBkSave">Save schedule</button>
+        <button class="btn" id="btnBkNow">Back up now</button>
+        <button class="btn" id="btnBkRefresh">Refresh status</button>
+      </div>
+      <div id="bkStatus" class="small-note" style="margin-top:12px;">Loading status\u2026</div>
+      <p class="small-note" style="margin-top:10px;">Backups use the same file format as \u201cDownload backup\u201d, so you can restore one with \u201cRestore from backup\u201d. They contain Aadhaar numbers and the in-app passwords: keep the Drive folder private (use a dedicated school Google account with 2-step verification).</p>
+    </div>
+  </div>`;
+}
+
+// Pure function: turns the stored status into the text shown on the page.
+function backupStatusHTML(cfg, now){
+  cfg = cfg || {};
+  const sched = cfg.schedule === undefined ? '1d' : cfg.schedule;
+  const fmt = ts => new Date(ts).toLocaleString();
+  const rows = [];
+  if(cfg.lastBackupAt){
+    const c = cfg.lastCounts || {};
+    rows.push(`<div><strong>Last successful backup:</strong> ${esc(fmt(cfg.lastBackupAt))}${cfg.lastFile ? ' \u2014 ' + esc(cfg.lastFile) : ''}</div>`);
+    if(c.students != null) rows.push(`<div>${esc(c.students)} students, ${esc(c.fees || 0)} fees, ${esc(c.payments || 0)} payments, ${esc(c.expenses || 0)} expenses, ${esc(c.exams || 0)} exams</div>`);
+  }else{
+    rows.push('<div><strong>No backup has been made yet.</strong> If this stays so after a day, the one-time setup may not be finished (see BACKUP-SETUP.md).</div>');
+  }
+  if(cfg.lastStatus === 'error'){
+    rows.push(`<div style="color:var(--danger);"><strong>The last attempt failed</strong> (${esc(fmt(cfg.lastRunAt || 0))}): ${esc(cfg.lastError || 'unknown error')}</div>`);
+  }
+  if(cfg.lastWarning) rows.push(`<div style="color:var(--danger);"><strong>Warning:</strong> ${esc(cfg.lastWarning)}</div>`);
+  if(cfg.requestedAt && cfg.requestedAt > (cfg.lastBackupAt || 0)) rows.push('<div>A backup was requested. It will run at the next check (within about 6 hours).</div>');
+  if(sched === 'off'){
+    rows.push('<div>Automatic backup is <strong>off</strong>.</div>');
+  }else{
+    const iv = BACKUP_INTERVAL_MS[sched] || BACKUP_INTERVAL_MS['1d'];
+    if(cfg.lastBackupAt) rows.push(`<div>Next backup due: about ${esc(fmt(cfg.lastBackupAt + iv))}</div>`);
+    const base = cfg.lastBackupAt || cfg.scheduleSetAt || 0;
+    if(base && now - base > iv + 2 * 86400000){
+      rows.push('<div style="color:var(--danger);"><strong>Backups look overdue.</strong> Open GitHub &gt; Actions &gt; \u201cDrive backup\u201d to see why, or run it manually.</div>');
+    }
+  }
+  return rows.join('');
+}
+
+function backupSetSchedule(value){
+  if(!BACKUP_SCHEDULES.some(s => s[0] === value)) return Promise.reject(new Error('Unknown schedule'));
+  return backupDocRef().set({ schedule: value, scheduleSetAt: Date.now(), scheduleSetBy: cloudUserEmail() }, { merge: true });
+}
+function backupRequestNow(){
+  return backupDocRef().set({ requestedAt: Date.now(), requestedBy: cloudUserEmail() }, { merge: true });
+}
+function backupLoadStatus(){
+  const el = document.getElementById('bkStatus');
+  const sel = document.getElementById('bkSchedule');
+  return backupDocRef().get().then(s => {
+    const cfg = s.exists ? (s.data() || {}) : {};
+    if(sel) sel.value = BACKUP_SCHEDULES.some(x => x[0] === cfg.schedule) ? cfg.schedule : '1d';
+    if(el) el.innerHTML = backupStatusHTML(cfg, Date.now());
+    return cfg;
+  }).catch(err => {
+    console.error('Backup status failed', err);
+    if(el) el.textContent = 'Could not read the backup status. Check your connection and sign-in.';
+  });
+}
+function backupWirePanel(){
+  if(!cloudDocRef) return;
+  const sel = document.getElementById('bkSchedule');
+  const bSave = document.getElementById('btnBkSave');
+  const bNow = document.getElementById('btnBkNow');
+  const bRef = document.getElementById('btnBkRefresh');
+  if(bSave) bSave.addEventListener('click', () => {
+    backupSetSchedule(sel.value).then(() => { toast('Backup schedule saved.'); return backupLoadStatus(); })
+      .catch(err => { console.error(err); toast('Could not save the schedule \u2014 check your connection.', true); });
+  });
+  if(bNow) bNow.addEventListener('click', () => {
+    backupRequestNow().then(() => { toast('Backup requested. It runs at the next check (within about 6 hours).'); return backupLoadStatus(); })
+      .catch(err => { console.error(err); toast('Could not request a backup \u2014 check your connection.', true); });
+  });
+  if(bRef) bRef.addEventListener('click', backupLoadStatus);
+  backupLoadStatus();
+}
+
 function wireCloudSignIn(){
   document.getElementById('cloudSignInForm').addEventListener('submit', (e) => {
     e.preventDefault();
@@ -1415,8 +1518,8 @@ const NAV_ITEMS = [
   { id:'fees',      label:'Fees',      icon:'fees',       roles:['management'] },
   { id:'payments',  label:'Payments',  icon:'payments',   roles:['management','feepayments'] },
 /*  { id:'attendance', label:'Attendance', icon:'calendar', roles:['management','teacher'] },
-  { id:'reportcards', label:'Report Cards', icon:'grad', roles:['management','teacher'] }, */
-  { id:'accounts',  label:'Accounts',  icon:'accounts',   roles:['management'] },
+  { id:'reportcards', label:'Report Cards', icon:'grad', roles:['management','teacher'] }, 
+  { id:'accounts',  label:'Accounts',  icon:'accounts',   roles:['management'] }, */
   { id:'reports',   label:'Reports',   icon:'reports',    roles:['management','teacher'] },
   { id:'notifications', label:'Notifications', icon:'bell', roles:['management'] },
   { id:'settings',  label:'Settings',  icon:'settings',   roles:['management'] },
@@ -4094,6 +4197,7 @@ function renderSettings(){
         </div>
       </div>
     </div>
+    ${backupPanelHTML()}
     <div class="panel">
       <div class="panel-head"><h3>Reset data</h3></div>
       <div class="panel-body">
@@ -4106,6 +4210,7 @@ function renderSettings(){
   const btnCloudSignOut = document.getElementById('btnCloudSignOut');
   if(btnCloudSignOut) btnCloudSignOut.addEventListener('click', signOutOfCloud);
   cloudWireSettingsPanel();
+  backupWirePanel();
   document.getElementById('btnSaveSchool').addEventListener('click', () => {
     DB.school.name = document.getElementById('s_name').value.trim() || DB.school.name;
     DB.school.address = document.getElementById('s_address').value.trim();
