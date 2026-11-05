@@ -41,13 +41,15 @@ function seedCloud(db, n = 50){
 
 /* ---------- fake Google Drive + OAuth ---------- */
 function makeFakeGoogle(opts = {}){
-  const g = { files: new Map(), folders: new Map(), calls: [], tick: 0, opts };
+  const g = { files: new Map(), folders: new Map(), calls: [], tick: 0, opts, uploadFails: opts.uploadFails || 0, failStatus: opts.failStatus || 502, lostOnce: !!opts.lostOnce, partialOnce: !!opts.partialOnce, netErr: opts.netErr || 0, tokenFails: opts.tokenFails || 0, lostFolderOnce: !!opts.lostFolderOnce };
   const J = (status, body) => ({ ok: status >= 200 && status < 300, status, json: async () => body });
   g.fetch = async (url, init = {}) => {
+    if(g.netErr > 0){ g.netErr--; g.calls.push('NETWORK-ERROR'); throw new TypeError('fetch failed'); }
     const u = new URL(url), method = (init.method || 'GET').toUpperCase();
     g.calls.push(method + ' ' + u.pathname);
     if(u.host === 'oauth2.googleapis.com'){
       const p = new URLSearchParams(String(init.body));
+      if(g.tokenFails > 0){ g.tokenFails--; return J(500, { error: 'backend_error' }); }
       if(opts.invalidGrant) return J(400, { error: 'invalid_grant', error_description: 'Token has been expired or revoked.' });
       if(p.get('client_id') !== 'cid' || p.get('client_secret') !== 'csecret-123456') return J(401, { error: 'invalid_client' });
       if(p.get('refresh_token') !== 'refresh-token-ABCDEF' || p.get('grant_type') !== 'refresh_token') return J(400, { error: 'invalid_grant' });
@@ -62,13 +64,19 @@ function makeFakeGoogle(opts = {}){
       const meta = JSON.parse(parts[0].split('\r\n\r\n')[1].trim());
       let content = parts[1].split('\r\n\r\n').slice(1).join('\r\n\r\n'); content = content.replace(/\r\n$/, '');
       const buf = Buffer.from(content, 'utf8');
+      if(g.uploadFails > 0){ g.uploadFails--; return J(g.failStatus, { error: { message: 'Bad Gateway' } }); }
       const id = 'file' + (++g.tick);
-      g.files.set(id, { id, name: meta.name, parent: meta.parents[0], createdTime: new Date(Date.UTC(2026, 10, 1) + g.tick * 1000).toISOString(), content, trashed: false });
-      return J(200, { id, name: meta.name, size: String(buf.length), md5Checksum: opts.badMd5 ? 'deadbeef' : crypto.createHash('md5').update(buf).digest('hex') });
+      const md5 = crypto.createHash('md5').update(buf).digest('hex');
+      g.files.set(id, { id, name: meta.name, parent: meta.parents[0], createdTime: new Date(Date.UTC(2026, 10, 1) + g.tick * 1000).toISOString(), content, size: buf.length, md5, trashed: false });
+      if(g.partialOnce){ g.partialOnce = false; const f = g.files.get(id); f.content = f.content.slice(0, 20); f.size = Buffer.byteLength(f.content); f.md5 = crypto.createHash('md5').update(f.content).digest('hex'); return J(502, { error: { message: 'Bad Gateway' } }); }
+      if(g.lostOnce){ g.lostOnce = false; return J(502, { error: { message: 'Bad Gateway' } }); }
+      return J(200, { id, name: meta.name, size: String(buf.length), md5Checksum: opts.badMd5 ? 'deadbeef' : md5 });
     }
     if(u.pathname === '/drive/v3/files' && method === 'POST'){
       const b = JSON.parse(init.body); const id = 'folder' + (++g.tick);
-      g.folders.set(id, { id, name: b.name, trashed: false }); return J(200, { id });
+      g.folders.set(id, { id, name: b.name, trashed: false });
+      if(g.lostFolderOnce){ g.lostFolderOnce = false; return J(502, { error: { message: 'Bad Gateway' } }); }
+      return J(200, { id });
     }
     if(u.pathname === '/drive/v3/files' && method === 'GET'){
       const q = u.searchParams.get('q') || '';
@@ -76,6 +84,11 @@ function makeFakeGoogle(opts = {}){
         return J(200, { files: [...g.folders.values()].filter(f => !f.trashed && q.includes("name='" + f.name + "'")) });
       }
       const parent = /'([^']+)' in parents/.exec(q)[1];
+      if(!q.includes('name contains')){
+        const nm = /name='([^']+)'/.exec(q)[1];
+        const hit = [...g.files.values()].filter(f => f.name === nm && f.parent === parent && !f.trashed);
+        return J(200, { files: hit.map(f => ({ id: f.id, name: f.name, size: String(f.size), md5Checksum: f.md5 })) });
+      }
       let list = [...g.files.values()].filter(f => f.parent === parent && !f.trashed && f.name.includes(FILE_PREFIX)).sort((a, b) => (a.createdTime < b.createdTime ? 1 : -1));
       const size = 2, start = Number(u.searchParams.get('pageToken') || 0);
       const page = list.slice(start, start + size);
@@ -211,6 +224,57 @@ const t = async (name, fn) => { try{ await fn(); passed++; console.log('  ok  ' 
   await t('an empty database is refused (no pointless backup)', async () => {
     const db = new MockDb(); const g = makeFakeGoogle();
     await assert.rejects(runBackup({ db, fetch: g.fetch, env: ENV, now: 1e12, force: true, log: mkLog() }), /No school data/);
+  });
+
+  console.log('Temporary Google problems');
+  const fast = { sleep: async () => {} };
+  const uploads = g => g.calls.filter(c => c === 'POST /upload/drive/v3/files').length;
+  await t('a temporary 502 on upload is retried and the backup still succeeds (one file only)', async () => {
+    const db = new MockDb(); seedCloud(db, 20); const g = makeFakeGoogle({ uploadFails: 2 }); const log = mkLog();
+    const r = await runBackup(Object.assign({ db, fetch: g.fetch, env: ENV, now: 1e12, force: true, log }, fast));
+    assert.ok(r.ok); assert.strictEqual(backupsIn(g).length, 1); assert.strictEqual(uploads(g), 3);
+    assert.ok(log.lines.some(l => /temporary problem \(upload\)/.test(l)) && log.lines.some(l => /try 3 of 4/.test(l)));
+    assert.strictEqual(db.store.get('ikhlas_school/backup').lastStatus, 'ok');
+  });
+  await t('Google saved the file but the reply was lost (502): no duplicate is created', async () => {
+    const db = new MockDb(); seedCloud(db, 20); const g = makeFakeGoogle({ lostOnce: true });
+    const r = await runBackup(Object.assign({ db, fetch: g.fetch, env: ENV, now: 1e12, force: true, log: mkLog() }, fast));
+    assert.ok(r.ok); assert.strictEqual(backupsIn(g).length, 1, 'exactly one backup file'); assert.strictEqual(uploads(g), 1, 'the file was not uploaded twice');
+  });
+  await t('a half-written file from the failed try is replaced by the complete one', async () => {
+    const db = new MockDb(); seedCloud(db, 20); const g = makeFakeGoogle({ partialOnce: true });
+    const r = await runBackup(Object.assign({ db, fetch: g.fetch, env: ENV, now: 1e12, force: true, log: mkLog() }, fast));
+    const files = backupsIn(g); assert.ok(r.ok); assert.strictEqual(files.length, 1);
+    assert.strictEqual(JSON.parse(files[0].content).students.length, 20, 'the saved file is complete');
+  });
+  await t('if Google keeps failing: gives up after 4 tries with a plain message and records it', async () => {
+    const db = new MockDb(); seedCloud(db, 20); const g = makeFakeGoogle({ uploadFails: 99 });
+    await assert.rejects(runBackup(Object.assign({ db, fetch: g.fetch, env: ENV, now: 1e12, force: true, log: mkLog() }, fast)), e => /upload failed \(502/.test(e.message) && /4 times in a row/.test(e.message) && /again in a few minutes/.test(e.message));
+    assert.strictEqual(uploads(g), 4); assert.strictEqual(backupsIn(g).length, 0);
+    const st = db.store.get('ikhlas_school/backup'); assert.strictEqual(st.lastStatus, 'error'); assert.ok(!st.lastBackupAt);
+  });
+  await t('network hiccups and a sign-in hiccup are retried', async () => {
+    const db = new MockDb(); seedCloud(db, 10); const g = makeFakeGoogle({ netErr: 2, tokenFails: 1 });
+    const r = await runBackup(Object.assign({ db, fetch: g.fetch, env: ENV, now: 1e12, force: true, log: mkLog() }, fast));
+    assert.ok(r.ok); assert.strictEqual(backupsIn(g).length, 1);
+  });
+  await t('a rate-limit answer (429) is retried', async () => {
+    const db = new MockDb(); seedCloud(db, 10); const g = makeFakeGoogle({ uploadFails: 1, failStatus: 429 });
+    const r = await runBackup(Object.assign({ db, fetch: g.fetch, env: ENV, now: 1e12, force: true, log: mkLog() }, fast));
+    assert.ok(r.ok); assert.strictEqual(uploads(g), 2);
+  });
+  await t('the backup folder is never duplicated when the folder reply is lost', async () => {
+    const db = new MockDb(); seedCloud(db, 10); const g = makeFakeGoogle({ lostFolderOnce: true });
+    const r = await runBackup(Object.assign({ db, fetch: g.fetch, env: ENV, now: 1e12, force: true, log: mkLog() }, fast));
+    assert.ok(r.ok); assert.strictEqual(g.folders.size, 1);
+  });
+  await t('permanent problems are NOT retried (revoked approval, Drive full)', async () => {
+    let db = new MockDb(); seedCloud(db, 10); let g = makeFakeGoogle({ invalidGrant: true });
+    await assert.rejects(runBackup(Object.assign({ db, fetch: g.fetch, env: ENV, now: 1e12, force: true, log: mkLog() }, fast)), /invalid_grant/);
+    assert.strictEqual(g.calls.filter(c => c.includes('/token')).length, 1);
+    db = new MockDb(); seedCloud(db, 10); g = makeFakeGoogle({ driveFull: true });
+    await assert.rejects(runBackup(Object.assign({ db, fetch: g.fetch, env: ENV, now: 1e12, force: true, log: mkLog() }, fast)), /Drive is full/);
+    assert.strictEqual(uploads(g), 1);
   });
   console.log('\n' + passed + ' backup checks passed');
 })();
