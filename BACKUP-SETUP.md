@@ -78,6 +78,7 @@ so try it first on a test project. The file format is the same as the app's own 
 | App shows **Backups look overdue** or **The last attempt failed** | GitHub > Actions > Drive backup > open the latest run to read the reason. GitHub also emails the person who set the schedule when a run fails. |
 | `invalid_grant` | Google no longer accepts the saved approval: the Google Cloud app was left in "Testing", or access was revoked. Publish the app (Part 3, step 3) and repeat steps 5 to 8 to get a new refresh token. |
 | `Missing GitHub secret(s)` | One of the four secrets is missing or misspelled (names are exact). |
+| `Google Drive upload failed (502)` or `(503)` | A temporary Google problem. The job already retries up to 4 times by itself and never creates duplicate files. If it still fails, run the workflow again a few minutes later. |
 | `Drive is full` | Free some space in the school Google account, or lower `BACKUP_KEEP`. |
 | Permission denied / wrong project | The Firebase key must be from the same project the app uses (iks-1-4v-db). |
 | No runs for a long time | GitHub pauses scheduled jobs in public repositories after 60 days without activity. The last step of the job tries to prevent this, but if it happens press **Run workflow** once to restart it. The app's "overdue" warning will tell you. |
