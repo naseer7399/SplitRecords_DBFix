@@ -35,11 +35,26 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-          cache: npm
-          cache-dependency-path: backup/package-lock.json
+
+      - name: Check the backup files are in the repository
+        run: |
+          missing=0
+          for f in backup/package.json backup/lib.js backup/run.js; do
+            if [ ! -f "$f" ]; then
+              echo "::error::Missing file in the repository: $f. Upload the whole 'backup' folder (see BACKUP-SETUP.md, Part 1)."
+              missing=1
+            fi
+          done
+          exit $missing
 
       - name: Install
-        run: npm ci --prefix backup --no-audit --no-fund
+        run: |
+          if [ -f backup/package-lock.json ]; then
+            npm ci --prefix backup --no-audit --no-fund
+          else
+            echo "backup/package-lock.json not found; installing from package.json instead."
+            npm install --prefix backup --no-audit --no-fund
+          fi
 
       - name: Back up to Google Drive
         run: node backup/run.js
