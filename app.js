@@ -4111,6 +4111,123 @@ function openRecentActivityModal(){
 /* ---------------------------------------------------------------
    Settings
    --------------------------------------------------------------- */
+/* ---------------------------------------------------------------
+   Settings page: collapsible sections, each with an icon before its heading
+   (same look as the sidebar menu). Which sections are open is remembered
+   on this device. The panels themselves are unchanged: this only wraps
+   their headers, so every button inside keeps working as before.
+   --------------------------------------------------------------- */
+const SETTINGS_OPEN_KEY = 'ikhlas_settings_open_v1';
+const SETTINGS_ICON_PATHS = {
+  cloud: '<path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/>',
+  cloudUp: '<path d="M12 13v8"/><path d="M4 14.9A7 7 0 1 1 15.7 8h1.8a4.5 4.5 0 0 1 2.5 8.2"/><path d="m8 17 4-4 4 4"/>',
+  chart: '<path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/>',
+  database: '<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/>',
+  school: '<path d="M3 21h18"/><path d="M5 21V10l7-5.5L19 10v11"/><path d="M10 21v-5h4v5"/><path d="M12 2.5v2"/><circle cx="12" cy="10" r="1.3"/>',
+  image: '<rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="1.7"/><path d="m21 16-5-5L6 20"/>',
+  lock: '<rect x="4.5" y="10.5" width="15" height="10" rx="2"/><path d="M8 10.5V8a4 4 0 0 1 8 0v2.5"/>',
+  key: '<path d="m15.5 7.5 2.3 2.3a1 1 0 0 0 1.4 0l2.1-2.1a1 1 0 0 0 0-1.4L19 4"/><path d="m21 2-9.6 9.6"/><circle cx="7.5" cy="15.5" r="5.5"/>',
+  shield: '<path d="M12 2 4 5v6c0 5 3.4 8.5 8 11 4.6-2.5 8-6 8-11V5Z"/>',
+  archive: '<rect x="2" y="3" width="20" height="5" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/><path d="M10 12h4"/>',
+  reset: '<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/>',
+  chevron: '<path d="m6 9 6 6 6-6"/>',
+  settings: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z"/>'
+};
+const SETTINGS_ICON_FOR = {
+  'Cloud sync': 'cloud',
+  'Database usage': 'chart',
+  'Cloud database upgrade': 'database',
+  'Cloud database layout': 'database',
+  'School details': 'school',
+  'School logo': 'image',
+  'Management password': 'lock',
+  'Fee Payments password': 'key',
+  'Data password': 'shield',
+  'Data backup': 'archive',
+  'Automatic backup to Google Drive': 'cloudUp',
+  'Reset data': 'reset'
+};
+let settingsOpenSet = null;
+function settingsIconSvg(key){
+  return '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + (SETTINGS_ICON_PATHS[key] || SETTINGS_ICON_PATHS.settings) + '</svg>';
+}
+function settingsLoadOpen(){
+  if(settingsOpenSet) return settingsOpenSet;
+  try{ settingsOpenSet = new Set(JSON.parse(localStorage.getItem(SETTINGS_OPEN_KEY) || '[]')); }
+  catch(e){ settingsOpenSet = new Set(); }
+  return settingsOpenSet;
+}
+function settingsSaveOpen(){
+  try{ localStorage.setItem(SETTINGS_OPEN_KEY, JSON.stringify(Array.from(settingsLoadOpen()))); }catch(e){}
+}
+// Lets other code (e.g. the usage warning pop-up) open a section before showing Settings.
+function settingsOpenSection(title){ settingsLoadOpen().add(title); settingsSaveOpen(); }
+
+function settingsMakeCollapsible(){
+  const root = document.getElementById('content');
+  if(!root) return;
+  const open = settingsLoadOpen();
+  const panels = [];
+  Array.prototype.forEach.call(root.children, el => { if(el.classList && el.classList.contains('panel')) panels.push(el); });
+  const sections = [];
+  panels.forEach((panel, i) => {
+    const head = panel.querySelector(':scope > .panel-head');
+    const body = panel.querySelector(':scope > .panel-body');
+    if(!head || !body || panel.classList.contains('collapsible')) return;
+    const h3 = head.querySelector('h3');
+    const title = h3 ? h3.textContent.trim() : '';
+    panel.classList.add('collapsible');
+
+    const icon = document.createElement('span');
+    icon.className = 'ph-icon';
+    icon.innerHTML = settingsIconSvg(SETTINGS_ICON_FOR[title]);
+    const text = document.createElement('div');
+    text.className = 'ph-text';
+    while(head.firstChild) text.appendChild(head.firstChild);
+    const chev = document.createElement('span');
+    chev.className = 'ph-chev';
+    chev.innerHTML = settingsIconSvg('chevron');
+    head.appendChild(icon); head.appendChild(text); head.appendChild(chev);
+
+    body.id = 'setbody' + i;
+    head.setAttribute('role', 'button');
+    head.setAttribute('tabindex', '0');
+    head.setAttribute('aria-controls', body.id);
+    const apply = (isOpen) => {
+      panel.classList.toggle('is-open', isOpen);
+      head.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+    };
+    apply(open.has(title));
+    const toggle = () => {
+      const now = !panel.classList.contains('is-open');
+      apply(now);
+      if(now) open.add(title); else open.delete(title);
+      settingsSaveOpen();
+      refreshAllLabel();
+    };
+    head.addEventListener('click', toggle);
+    head.addEventListener('keydown', (e) => { if(e.key === 'Enter' || e.key === ' '){ e.preventDefault(); toggle(); } });
+    sections.push({ title, apply });
+  });
+  if(!sections.length) return;
+
+  // "Expand all / Collapse all" above the list
+  const tools = document.createElement('div');
+  tools.className = 'settings-tools';
+  tools.innerHTML = '<button type="button" class="btn btn-sm" id="btnSettingsAll"></button>';
+  root.insertBefore(tools, root.firstChild);
+  const btnAll = tools.firstChild;
+  function allOpen(){ return sections.every(s => open.has(s.title)); }
+  function refreshAllLabel(){ btnAll.textContent = allOpen() ? 'Collapse all' : 'Expand all'; }
+  btnAll.addEventListener('click', () => {
+    const target = !allOpen();
+    sections.forEach(s => { s.apply(target); if(target) open.add(s.title); else open.delete(s.title); });
+    settingsSaveOpen();
+    refreshAllLabel();
+  });
+  refreshAllLabel();
+}
+
 function renderSettings(){
   setTopbar('Settings', 'School details, password, alerts and data backup');
   setContent(`
@@ -4211,6 +4328,7 @@ function renderSettings(){
   if(btnCloudSignOut) btnCloudSignOut.addEventListener('click', signOutOfCloud);
   cloudWireSettingsPanel();
   backupWirePanel();
+  settingsMakeCollapsible();
   document.getElementById('btnSaveSchool').addEventListener('click', () => {
     DB.school.name = document.getElementById('s_name').value.trim() || DB.school.name;
     DB.school.address = document.getElementById('s_address').value.trim();
@@ -4752,7 +4870,7 @@ function fbuShowAlert(preview){
   document.getElementById('fbuAlertX').addEventListener('click', fbuCloseAlert);
   document.getElementById('fbuAlertClose').addEventListener('click', fbuCloseAlert);
   document.getElementById('fbuAlertOverlay').addEventListener('click', (e) => { if(e.target.id === 'fbuAlertOverlay') fbuCloseAlert(); });
-  document.getElementById('fbuAlertSettings').addEventListener('click', () => { fbuCloseAlert(); if(typeof navigate === 'function') navigate('settings'); });
+  document.getElementById('fbuAlertSettings').addEventListener('click', () => { fbuCloseAlert(); if(typeof settingsOpenSection === 'function') settingsOpenSection('Database usage'); if(typeof navigate === 'function') navigate('settings'); });
   document.addEventListener('keydown', fbuEscClose);
 }
 
