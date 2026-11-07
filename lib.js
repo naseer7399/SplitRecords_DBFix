@@ -119,72 +119,128 @@ function countsOf(d){
 }
 
 /* ---------- Google Drive (OAuth refresh token, scope drive.file) ---------- */
-function makeDrive({ fetch, clientId, clientSecret, refreshToken }){
+// Temporary Google problems (502/503, rate limits, network hiccups) are retried automatically.
+function makeDrive({ fetch, clientId, clientSecret, refreshToken, sleep, delays, onRetry, timeoutMs }){
+  sleep = sleep || (ms => new Promise(r => setTimeout(r, ms)));
+  delays = delays || [2000, 6000, 15000];            // up to 4 tries in total
+  timeoutMs = timeoutMs || 60000;
   let access = null;
+
+  const isNetwork = e => e && !(e instanceof BackupError) &&
+    (e.name === 'TypeError' || e.name === 'TimeoutError' || e.name === 'AbortError' || /fetch failed|ECONN|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket|network/i.test(String(e.message)));
+  async function withRetry(what, fn){
+    for(let i = 0; ; i++){
+      try{ return await fn(i); }
+      catch(e){
+        const transient = (e instanceof BackupError && e.retryable) || isNetwork(e);
+        if(!transient) throw e;
+        if(i >= delays.length){
+          if(e instanceof BackupError){
+            e.message += ' It failed ' + (i + 1) + ' times in a row. This is usually a temporary Google problem: run the backup again in a few minutes.';
+            throw e;
+          }
+          throw new BackupError('Could not reach Google Drive for the ' + what + ' (network problem). Run the backup again in a few minutes.', 'network');
+        }
+        if(onRetry) onRetry(what, i + 1, delays[i]);
+        await sleep(delays[i]);
+      }
+    }
+  }
+  const send = (url, init) => fetch(url, Object.assign({}, init, { signal: AbortSignal.timeout(timeoutMs) }));
+
   async function token(){
     if(access) return access;
-    const r = await fetch('https://oauth2.googleapis.com/token', {
-      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({ client_id: clientId, client_secret: clientSecret, refresh_token: refreshToken, grant_type: 'refresh_token' }).toString()
+    access = await withRetry('sign-in', async () => {
+      const r = await send('https://oauth2.googleapis.com/token', {
+        method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ client_id: clientId, client_secret: clientSecret, refresh_token: refreshToken, grant_type: 'refresh_token' }).toString()
+      });
+      let j = {};
+      try{ j = await r.json(); }catch(e){}
+      if(!r.ok || !j.access_token){
+        if(j.error === 'invalid_grant') throw new BackupError('Google no longer accepts the saved approval (invalid_grant). It was revoked, or the Google Cloud app is still in "Testing" mode (approvals then expire after 7 days). Repeat the one-time Google approval and update the GOOGLE_REFRESH_TOKEN secret.', 'invalid_grant');
+        if(j.error === 'invalid_client') throw new BackupError('Google rejected GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET (invalid_client). Check both secrets.', 'invalid_client');
+        const e = new BackupError('Could not get a Google access token (' + (j.error || r.status) + ').', 'token');
+        e.retryable = r.status === 429 || r.status >= 500;
+        throw e;
+      }
+      return j.access_token;
     });
-    let j = {};
-    try{ j = await r.json(); }catch(e){}
-    if(!r.ok || !j.access_token){
-      if(j.error === 'invalid_grant') throw new BackupError('Google no longer accepts the saved approval (invalid_grant). It was revoked, or the Google Cloud app is still in "Testing" mode (approvals then expire after 7 days). Repeat the one-time Google approval and update the GOOGLE_REFRESH_TOKEN secret.', 'invalid_grant');
-      if(j.error === 'invalid_client') throw new BackupError('Google rejected GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET (invalid_client). Check both secrets.', 'invalid_client');
-      throw new BackupError('Could not get a Google access token (' + (j.error || r.status) + ').', 'token');
-    }
-    access = j.access_token;
     return access;
   }
   async function api(url, opts){
     const t = await token();
     opts = opts || {};
-    return fetch(url, Object.assign({}, opts, { headers: Object.assign({ Authorization: 'Bearer ' + t }, opts.headers || {}) }));
+    return send(url, Object.assign({}, opts, { headers: Object.assign({ Authorization: 'Bearer ' + t }, opts.headers || {}) }));
   }
   async function ok(r, what){
     if(r.ok) return r.status === 204 ? {} : r.json();
     let msg = '';
     try{ const j = await r.json(); msg = (j.error && (j.error.message || j.error)) || ''; }catch(e){}
-    if(r.status === 403 && /storageQuota|quota/i.test(String(msg))) throw new BackupError('Your Google Drive is full. Free some space and run the backup again.', 'drive_full');
-    throw new BackupError('Google Drive ' + what + ' failed (' + r.status + (msg ? ': ' + String(msg).slice(0, 160) : '') + ').', 'drive_' + r.status);
+    if(r.status === 403 && /storage\s*quota|storageQuota/i.test(String(msg))) throw new BackupError('Your Google Drive is full. Free some space and run the backup again.', 'drive_full');
+    const e = new BackupError('Google Drive ' + what + ' failed (' + r.status + (msg ? ': ' + String(msg).slice(0, 160) : '') + ').', 'drive_' + r.status);
+    e.retryable = r.status === 429 || r.status === 408 || r.status >= 500 || (r.status === 403 && /rate\s*limit/i.test(String(msg)));
+    throw e;
   }
   const q = s => s.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+  async function removeFile(id){
+    const r = await api(DRIVE + '/files/' + encodeURIComponent(id), { method: 'DELETE' });
+    if(!r.ok && r.status !== 404) await ok(r, 'delete');
+  }
   return {
     async ensureFolder(knownId){
       if(knownId){
-        const r = await api(DRIVE + '/files/' + encodeURIComponent(knownId) + '?fields=id,trashed,mimeType');
-        if(r.ok){
-          const j = await r.json();
-          if(!j.trashed && j.mimeType === FOLDER_MIME) return { id: j.id, created: false };
-        }else if(r.status !== 404) await ok(r, 'folder lookup');
+        const found = await withRetry('folder check', async () => {
+          const r = await api(DRIVE + '/files/' + encodeURIComponent(knownId) + '?fields=id,trashed,mimeType');
+          if(r.ok){
+            const j = await r.json();
+            return (!j.trashed && j.mimeType === FOLDER_MIME) ? { id: j.id, created: false } : null;
+          }
+          if(r.status === 404) return null;
+          return ok(r, 'folder lookup');
+        });
+        if(found) return found;
       }
-      const s = await ok(await api(DRIVE + '/files?fields=files(id,name)&pageSize=10&q=' + encodeURIComponent("name='" + q(FOLDER_NAME) + "' and mimeType='" + FOLDER_MIME + "' and trashed=false")), 'folder search');
-      if(s.files && s.files.length) return { id: s.files[0].id, created: false };
-      const c = await ok(await api(DRIVE + '/files?fields=id', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: FOLDER_NAME, mimeType: FOLDER_MIME }) }), 'folder creation');
-      return { id: c.id, created: true };
+      // Each try searches first, so a folder created by an earlier try (whose answer got lost) is reused, never duplicated.
+      return withRetry('folder setup', async () => {
+        const s = await ok(await api(DRIVE + '/files?fields=files(id,name)&pageSize=10&q=' + encodeURIComponent("name='" + q(FOLDER_NAME) + "' and mimeType='" + FOLDER_MIME + "' and trashed=false")), 'folder search');
+        if(s.files && s.files.length) return { id: s.files[0].id, created: false };
+        const c = await ok(await api(DRIVE + '/files?fields=id', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: FOLDER_NAME, mimeType: FOLDER_MIME }) }), 'folder creation');
+        return { id: c.id, created: true };
+      });
     },
     async upload(folderId, name, buffer){
-      const boundary = 'ikhlas' + crypto.randomBytes(12).toString('hex');
-      const head = '--' + boundary + '\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n' + JSON.stringify({ name, parents: [folderId], mimeType: 'application/json' }) + '\r\n--' + boundary + '\r\nContent-Type: application/json\r\n\r\n';
-      const body = Buffer.concat([Buffer.from(head), buffer, Buffer.from('\r\n--' + boundary + '--')]);
-      return ok(await api(UPLOAD + '?uploadType=multipart&fields=id,name,size,md5Checksum', { method: 'POST', headers: { 'Content-Type': 'multipart/related; boundary=' + boundary }, body }), 'upload');
+      const md5 = crypto.createHash('md5').update(buffer).digest('hex');
+      const size = String(buffer.length);
+      return withRetry('upload', async (attempt) => {
+        if(attempt > 0){
+          // Google can report an error even though it saved the file. Look first, so we never create a duplicate.
+          const s = await ok(await api(DRIVE + '/files?fields=files(id,name,size,md5Checksum)&pageSize=10&q=' + encodeURIComponent("name='" + q(name) + "' and '" + q(folderId) + "' in parents and trashed=false")), 'upload check');
+          const files = s.files || [];
+          const same = files.find(f => String(f.size) === size && (!f.md5Checksum || f.md5Checksum === md5));
+          if(same) return { id: same.id, name: same.name, size: same.size, md5Checksum: same.md5Checksum };
+          for(const f of files) await removeFile(f.id);        // incomplete leftovers of the failed try
+        }
+        const boundary = 'ikhlas' + crypto.randomBytes(12).toString('hex');
+        const head = '--' + boundary + '\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n' + JSON.stringify({ name, parents: [folderId], mimeType: 'application/json' }) + '\r\n--' + boundary + '\r\nContent-Type: application/json\r\n\r\n';
+        const body = Buffer.concat([Buffer.from(head), buffer, Buffer.from('\r\n--' + boundary + '--')]);
+        return ok(await api(UPLOAD + '?uploadType=multipart&fields=id,name,size,md5Checksum', { method: 'POST', headers: { 'Content-Type': 'multipart/related; boundary=' + boundary }, body }), 'upload');
+      });
     },
     async listBackups(folderId){
-      let all = [], page = '';
-      do{
-        const url = DRIVE + '/files?fields=nextPageToken,files(id,name,createdTime)&pageSize=200&orderBy=' + encodeURIComponent('createdTime desc') +
-          '&q=' + encodeURIComponent("'" + q(folderId) + "' in parents and trashed=false and name contains '" + FILE_PREFIX + "'") + (page ? '&pageToken=' + encodeURIComponent(page) : '');
-        const j = await ok(await api(url), 'listing');
-        all = all.concat(j.files || []);
-        page = j.nextPageToken || '';
-      }while(page);
-      return all.filter(f => f.name.startsWith(FILE_PREFIX) && f.name.endsWith('.json'));
+      return withRetry('listing', async () => {
+        let all = [], page = '';
+        do{
+          const url = DRIVE + '/files?fields=nextPageToken,files(id,name,createdTime)&pageSize=200&orderBy=' + encodeURIComponent('createdTime desc') +
+            '&q=' + encodeURIComponent("'" + q(folderId) + "' in parents and trashed=false and name contains '" + FILE_PREFIX + "'") + (page ? '&pageToken=' + encodeURIComponent(page) : '');
+          const j = await ok(await api(url), 'listing');
+          all = all.concat(j.files || []);
+          page = j.nextPageToken || '';
+        }while(page);
+        return all.filter(f => f.name.startsWith(FILE_PREFIX) && f.name.endsWith('.json'));
+      });
     },
-    async remove(id){
-      const r = await api(DRIVE + '/files/' + encodeURIComponent(id), { method: 'DELETE' });
-      if(!r.ok && r.status !== 404) await ok(r, 'delete');
-    }
+    async remove(id){ return withRetry('delete', () => removeFile(id)); }
   };
 }
 
@@ -201,7 +257,7 @@ function redactor(secrets){
 }
 
 /* ---------- the whole job ---------- */
-async function runBackup({ db, fetch, env, now, force, log }){
+async function runBackup({ db, fetch, env, now, force, log, sleep, delays }){
   const hide = redactor([env.GOOGLE_CLIENT_SECRET, env.GOOGLE_REFRESH_TOKEN, env.GOOGLE_CLIENT_ID]);
   const ref = db.doc(BACKUP_DOC);
   const cfg = (await ref.get()).data() || {};
@@ -220,7 +276,10 @@ async function runBackup({ db, fetch, env, now, force, log }){
     // but keep every older backup (do not delete anything) and tell the admin.
     const prev = cfg.lastCounts || {};
     const shrank = (prev.students > 0 && counts.students < prev.students * 0.5) || (prev.payments > 20 && counts.payments < prev.payments * 0.5);
-    const drive = makeDrive({ fetch, clientId: env.GOOGLE_CLIENT_ID, clientSecret: env.GOOGLE_CLIENT_SECRET, refreshToken: env.GOOGLE_REFRESH_TOKEN });
+    const drive = makeDrive({
+      fetch, clientId: env.GOOGLE_CLIENT_ID, clientSecret: env.GOOGLE_CLIENT_SECRET, refreshToken: env.GOOGLE_REFRESH_TOKEN, sleep, delays,
+      onRetry: (what, n, ms) => log('Google Drive had a temporary problem (' + what + '). Trying again in ' + Math.round(ms / 1000) + ' s (try ' + (n + 1) + ' of 4).')
+    });
     const folder = await drive.ensureFolder(cfg.folderId);
     if(folder.created) log('Created the Drive folder "' + FOLDER_NAME + '".');
     const name = FILE_PREFIX + stamp(now) + '.json';
