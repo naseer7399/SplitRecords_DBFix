@@ -597,3 +597,34 @@ table.marks-grid .ed-grade b{ color:var(--primary); }
 .fee-rows-head{ font-size:11.5px; color: var(--ink-soft); margin-bottom:4px; }
 .fee-row{ margin-bottom:8px; }
 .fee-row .fr-other{ margin-top:6px; }
+
+
+/* ---------------------------------------------------------------
+   Settings: collapsible sections (icon before the heading, like the sidebar)
+   --------------------------------------------------------------- */
+.settings-tools{ display:flex; justify-content:flex-end; margin-bottom:12px; }
+.panel.collapsible > .panel-head{
+  cursor: pointer; user-select: none; flex-wrap: nowrap; gap: 12px;
+  border-bottom: 1px solid var(--line);
+}
+.panel.collapsible > .panel-head:hover{ background: var(--surface-sunk); }
+.panel.collapsible > .panel-head:focus-visible{ outline: 2px solid var(--primary); outline-offset: -2px; }
+.panel.collapsible:not(.is-open) > .panel-head{ border-bottom: none; }
+.panel.collapsible:not(.is-open) > .panel-body{ display: none; }
+.panel.collapsible .ph-icon{
+  flex: none; width: 34px; height: 34px; border-radius: 9px;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--primary-tint); color: var(--primary);
+}
+.panel.collapsible .ph-icon svg{ width: 18px; height: 18px; }
+.panel.collapsible .ph-text{
+  flex: 1; min-width: 0;
+  display: flex; align-items: center; justify-content: space-between; gap: 4px 12px; flex-wrap: wrap;
+}
+.panel.collapsible .ph-chev{ flex: none; color: var(--ink-soft); display: flex; }
+.panel.collapsible .ph-chev svg{ width: 18px; height: 18px; transition: transform .18s ease; }
+.panel.collapsible.is-open .ph-chev svg{ transform: rotate(180deg); }
+@media (prefers-reduced-motion: reduce){ .panel.collapsible .ph-chev svg{ transition: none; } }
+@media (max-width: 600px){
+  .panel.collapsible .ph-text{ flex-direction: column; align-items: flex-start; }
+}
