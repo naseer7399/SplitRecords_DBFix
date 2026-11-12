@@ -1021,27 +1021,30 @@ function backupStatusHTML(cfg, now){
   cfg = cfg || {};
   const sched = cfg.schedule === undefined ? '1d' : cfg.schedule;
   const fmt = ts => new Date(ts).toLocaleString();
+  // A coloured label (green / gold / red) followed by plain explanatory text.
+  const pill = (colour, text) => `<span class="bk-pill ${colour}">${esc(text)}</span>`;
+  const row = (inner, extra) => `<div class="bk-row${extra ? ' ' + extra : ''}">${inner}</div>`;
   const rows = [];
   if(cfg.lastBackupAt){
     const c = cfg.lastCounts || {};
-    rows.push(`<div><strong>Last successful backup:</strong> ${esc(fmt(cfg.lastBackupAt))}${cfg.lastFile ? ' \u2014 ' + esc(cfg.lastFile) : ''}</div>`);
-    if(c.students != null) rows.push(`<div>${esc(c.students)} students, ${esc(c.fees || 0)} fees, ${esc(c.payments || 0)} payments, ${esc(c.expenses || 0)} expenses, ${esc(c.exams || 0)} exams</div>`);
+    rows.push(row(pill('green', 'Last successful backup') + `<span class="bk-text">${esc(fmt(cfg.lastBackupAt))}${cfg.lastFile ? ' \u2014 ' + esc(cfg.lastFile) : ''}</span>`));
+    if(c.students != null) rows.push(row(`<span class="bk-text">${esc(c.students)} students, ${esc(c.fees || 0)} fees, ${esc(c.payments || 0)} payments, ${esc(c.expenses || 0)} expenses, ${esc(c.exams || 0)} exams</span>`, 'bk-sub'));
   }else{
-    rows.push('<div><strong>No backup has been made yet.</strong> If this stays so after a day, the one-time setup may not be finished (see BACKUP-SETUP.md).</div>');
+    rows.push(row(pill('gold', 'No backup has been made yet') + '<span class="bk-text">If this stays so after a day, the one-time setup may not be finished (see BACKUP-SETUP.md).</span>'));
   }
   if(cfg.lastStatus === 'error'){
-    rows.push(`<div style="color:var(--danger);"><strong>The last attempt failed</strong> (${esc(fmt(cfg.lastRunAt || 0))}): ${esc(cfg.lastError || 'unknown error')}</div>`);
+    rows.push(row(pill('red', 'The last attempt failed') + `<span class="bk-text">(${esc(fmt(cfg.lastRunAt || 0))}): ${esc(cfg.lastError || 'unknown error')}</span>`));
   }
-  if(cfg.lastWarning) rows.push(`<div style="color:var(--danger);"><strong>Warning:</strong> ${esc(cfg.lastWarning)}</div>`);
-  if(cfg.requestedAt && cfg.requestedAt > (cfg.lastBackupAt || 0)) rows.push('<div>A backup was requested. It will run at the next check (within about 6 hours).</div>');
+  if(cfg.lastWarning) rows.push(row(pill('red', 'Warning') + `<span class="bk-text">${esc(cfg.lastWarning)}</span>`));
+  if(cfg.requestedAt && cfg.requestedAt > (cfg.lastBackupAt || 0)) rows.push(row('<span class="bk-text">A backup was requested. It will run at the next check (within about 6 hours).</span>'));
   if(sched === 'off'){
-    rows.push('<div>Automatic backup is <strong>off</strong>.</div>');
+    rows.push(row('<span class="bk-text">Automatic backup is <strong>off</strong>.</span>'));
   }else{
     const iv = BACKUP_INTERVAL_MS[sched] || BACKUP_INTERVAL_MS['1d'];
-    if(cfg.lastBackupAt) rows.push(`<div>Next backup due: about ${esc(fmt(cfg.lastBackupAt + iv))}</div>`);
+    if(cfg.lastBackupAt) rows.push(row(`<span class="bk-text">Next backup due: about ${esc(fmt(cfg.lastBackupAt + iv))}</span>`));
     const base = cfg.lastBackupAt || cfg.scheduleSetAt || 0;
     if(base && now - base > iv + 2 * 86400000){
-      rows.push('<div style="color:var(--danger);"><strong>Backups look overdue.</strong> Open GitHub &gt; Actions &gt; \u201cDrive backup\u201d to see why, or run it manually.</div>');
+      rows.push(row(pill('red', 'Backups look overdue') + '<span class="bk-text">Open GitHub &gt; Actions &gt; \u201cDrive backup\u201d to see why, or run it manually.</span>'));
     }
   }
   return rows.join('');
