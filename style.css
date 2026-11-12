@@ -628,3 +628,39 @@ table.marks-grid .ed-grade b{ color:var(--primary); }
 @media (max-width: 600px){
   .panel.collapsible .ph-text{ flex-direction: column; align-items: flex-start; }
 }
+
+/* ---------------------------------------------------------------
+   Automatic backup status: coloured labels (same colours as the guide)
+   --------------------------------------------------------------- */
+.bk-row{ display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin: 8px 0; line-height: 1.5; }
+.bk-row.bk-sub{ margin-top: -2px; }
+.bk-pill{
+  display: inline-block; flex: none;
+  font-size: 13px; font-weight: 600; line-height: 1.25;
+  padding: 2px 10px; border-radius: 999px;
+  background: #E7EDF2; color: #1F3B57;
+}
+.bk-pill.green{ background: #DDF0E4; color: #2F7D4F; }
+.bk-pill.gold{  background: #FBEFD6; color: #8A5A00; }
+.bk-pill.red{   background: #F8E1DC; color: #B4412F; }
+.bk-text{ color: var(--ink-soft); font-size: 12.5px; }
+
+/* ---------------------------------------------------------------
+   Frozen table headings ("freeze top row" / sticky header): the heading
+   row stays visible while the rows scroll. The table box gets its own
+   scroll area, so this also works together with sideways scrolling on
+   small screens.
+   --------------------------------------------------------------- */
+.table-wrap{ overflow: auto; max-height: max(320px, calc(100vh - 230px)); }
+.table-wrap table{ border-collapse: separate; border-spacing: 0; }   /* keeps the heading's bottom line attached while scrolling */
+.table-wrap thead th{ position: sticky; top: 0; z-index: 2; }
+@media (max-width: 860px){
+  .table-wrap{ max-height: max(300px, calc(100vh - 290px)); }
+}
+/* tables inside pop-up windows already sit in a scrolling box: leave them as they were */
+.modal-body .table-wrap{ max-height: none; overflow-x: auto; }
+.modal-body .table-wrap thead th{ position: static; }
+@media print{
+  .table-wrap{ max-height: none !important; overflow: visible !important; }
+  .table-wrap thead th{ position: static; }
+}
